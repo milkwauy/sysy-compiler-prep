@@ -1,0 +1,120 @@
+name: verify
+
+# CI 就是本组的"第三人"：它替队友做代码审查。
+# 两条 lane 各自 push 后，这里自动跑通并比对冻结的期望输出；绿了就能合并，不需要找队友讨论。
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  contract:
+    name: 冻结契约自检（期望输出必须可复现）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验 expected/ 与参考实现一致
+        run: bash common/verify_expected.sh
+
+  llvm-lane:
+    name: A 线 · LLVM IR（x86 验证）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 clang / llvm
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
+      - name: 编译各阶段产物
+        run: |
+          mkdir -p A-llvm/gen
+          clang -E common/sysy_main.c -o A-llvm/gen/main.i
+          clang -S -emit-llvm -O0 common/sysy_main.c -o A-llvm/gen/main_O0.ll
+          clang -S -emit-llvm -O2 common/sysy_main.c -o A-llvm/gen/main_O2.ll
+      - name: 校验手写 IR 语法正确
+        run: |
+          if [ -f A-llvm/main.ll ]; then llvm-as A-llvm/main.ll -o /dev/null; else echo "尚未提交手写 main.ll，跳过"; fi
+      - name: 运行验证（需要 libsysy_x86.a，缺失则跳过）
+        run: |
+          if [ -f A-llvm/libsysy/libsysy_x86.a ]; then
+            clang -o A-llvm/gen/main_x86 A-llvm/gen/main_O0.ll -L A-llvm/libsysy -lsysy_x86
+            diff <(./A-llvm/gen/main_x86 < common/testdata/case1.in) common/expected/case1.out
+          else
+            echo "::warning::未找到 A-llvm/libsysy/libsysy_x86.a，跳过运行验证"
+          fi
+
+  riscv-lane:
+    name: B 线 · RISC-V 汇编（qemu 验证）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 RISC-V 工具链与 qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-unknown-elf qemu-user
+      - name: 汇编 -> 目标文件 -> 反汇编
+        run: |
+          mkdir -p B-riscv/obj
+          if [ -f B-riscv/main.S ]; then
+            riscv64-unknown-elf-gcc B-riscv/main.S -c -o B-riscv/obj/main.o -w
+            riscv64-unknown-elf-objdump -d B-riscv/obj/main.o > B-riscv/obj/anti_obj.S
+            riscv64-unknown-elf-readelf -r B-riscv/obj/main.o > B-riscv/obj/reloc.txt
+          else
+            echo "::warning::尚未提交 B-riscv/main.S，跳过"
+          fi
+      - name: 链接并运行验证
+        run: |
+          if [ -f B-riscv/main.S ] && [ -f B-riscv/libsysy/libsysy_riscv.a ]; then
+            riscv64-unknown-elf-gcc B-riscv/obj/main.o -o B-riscv/obj/main \
+              -L B-riscv/libsysy -lsysy_riscv \
+              -static -mcmodel=medany -Wl,--no-relax,-Ttext=0x90000000
+            diff <(qemu-riscv64 ./B-riscv/obj/main < common/testdata/case1.in) common/expected/case1.out
+          else
+            echo "::warning::缺少 main.S 或 libsysy_riscv.a，跳过运行验证"
+          fi
+
+  mlir-advanced:
+    name: 进阶 · MLIR 逐层 lowering（可选）
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 mlir
+        run: sudo apt-get update && sudo apt-get install -y mlir-19-tools || sudo apt-get install -y mlir-21-tools
+      - name: 逐层 lowering
+        run: |
+          mkdir -p advanced-mlir/logs
+          if [ -f advanced-mlir/vecadd/vecadd.mlir ]; then
+            # 从示例文件里抽出真正的 MLIR 源（文件里其余都是注释）
+            sed -n '/vecadd-parse-begin/,/vecadd-parse-end/p' advanced-mlir/vecadd/vecadd.mlir \
+              | grep -v '^\s*//' > advanced-mlir/logs/vecadd_core.mlir
+
+            # --- A 负责的三层 ---
+            mlir-opt advanced-mlir/logs/vecadd_core.mlir \
+              --pass-pipeline='builtin.module(func.func(linalg-generalize-named-ops))' \
+              -o advanced-mlir/logs/l1.mlir
+            mlir-opt advanced-mlir/logs/l1.mlir --convert-linalg-to-loops -o advanced-mlir/logs/l2.mlir
+            mlir-opt advanced-mlir/logs/l2.mlir --convert-scf-to-cf     -o advanced-mlir/logs/l3.mlir
+            echo "A 的三层已生成：l1 / l2 / l3"
+
+            # --- B 负责的三层（交接物就是上面那个 l3.mlir）---
+            mlir-opt advanced-mlir/logs/l3.mlir \
+              --one-shot-bufferize='bufferize-function-boundaries' \
+              --buffer-deallocation-pipeline \
+              -o advanced-mlir/logs/l3_5.mlir
+            mlir-opt advanced-mlir/logs/l3_5.mlir --convert-to-llvm -o advanced-mlir/logs/l4.mlir
+            mlir-translate --mlir-to-llvmir advanced-mlir/logs/l4.mlir -o advanced-mlir/logs/l5.ll
+            echo "B 的三层已生成：l3_5 / l4 / l5"
+
+            # --- 各层还剩哪些方言（观察信息在哪一层消失）---
+            for f in vecadd_core l1 l2 l3 l3_5 l4; do
+              [ -f "advanced-mlir/logs/$f.mlir" ] || continue
+              printf "%-14s " "$f"
+              grep -oE '\b(linalg|tensor|memref|scf|cf|arith|func|affine|llvm)\.[a-z_]+' \
+                "advanced-mlir/logs/$f.mlir" | cut -d. -f1 | sort -u | tr '\n' ' '
+              echo
+            done
+          else
+            echo "::warning::尚未提交 advanced-mlir/vecadd/vecadd.mlir"
+          fi

@@ -1,0 +1,34 @@
+# 编译产物（可随时重新生成）
+*.o
+*.obj
+*.exe
+*.out
+# ↑ 注意：下面的取反规则保证"验收契约"文件不被忽略
+!common/expected/*.out
+*.i
+*.bc
+*.dot
+*.log
+*.png
+*.pdf
+
+# 运行库：体积大，不入库；请按 common/env.md 自行放置
+# （B-riscv/sylib_ref.S 是自实现运行库的源码，要入库；只忽略二进制目录）
+A-llvm/libsysy/
+B-riscv/libsysy/
+
+# 反汇编/符号表等中间分析产物（报告里贴片段即可，不必全入库）
+A-llvm/gen/
+A-llvm/analysis/
+B-riscv/obj/
+B-riscv/ref/
+advanced-mlir/logs/
+
+# 自检脚本的临时输出
+tools/_out/
+
+# 工具
+.vscode/
+.idea/
+__pycache__/
+ref

@@ -1,0 +1,50 @@
+# ============================================================================
+# 换行符策略 —— 这个文件必须在第一次提交之前就存在
+#
+# 为什么这么重要：
+#   本仓库的脚本要在 WSL 里用 bash 跑，期望输出文件要和程序输出做逐字节 diff。
+#   而 Git for Windows 默认可能把换行符转成 CRLF，导致两个后果：
+#     1) bash: ./tools/check_laneA.sh: /bin/bash^M: bad interpreter: No such file or directory
+#     2) diff 认为每一行都不一样（因为每行末尾多了个 \r）
+#   所以必须在这里显式声明：文本一律用 LF 存储，脚本和期望输出强制 LF。
+# ============================================================================
+
+# 默认：所有文本文件在仓库里统一存成 LF
+* text=auto eol=lf
+
+# 所有脚本强制 LF（即使有人在 Windows 上 checkout 也不能变 CRLF）
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# 期望输出是"验收契约"，必须逐字节固定
+*.out     text eol=lf
+*.in      text eol=lf
+*.expect  text eol=lf
+
+# 源码与文档
+*.c    text eol=lf
+*.h    text eol=lf
+*.ll   text eol=lf
+*.bc   text eol=lf
+*.S    text eol=lf
+*.s    text eol=lf
+*.mlir text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+Makefile text eol=lf
+.gitignore text eol=lf
+
+# 二进制文件：禁止任何换行符转换和 diff
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.pdf     binary
+*.a       binary
+*.so      binary
+*.o       binary
+*.obj     binary
+*.exe     binary
+
+# GitHub 的语言统计：把汇编目录正确识别为汇编而不是 C
+B-riscv/*.S linguist-language=Assembly
+*.ll        linguist-language=LLVM
